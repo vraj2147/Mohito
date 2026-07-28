@@ -1,0 +1,14 @@
+# Virtualenvs
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Scrape output — runs/ holds the raw SERP HTML and reaches multiple GB.
+runs/
+*.log
+
+# Saved SERPs from single-query runs
+google_*.html
