@@ -12,7 +12,7 @@
     <option name="IS_MODULE_SDK" value="false" />
     <option name="ADD_CONTENT_ROOTS" value="true" />
     <option name="ADD_SOURCE_ROOTS" value="true" />
-    <option name="SCRIPT_NAME" value="$PROJECT_DIR$/google_search_html.py" />
+    <option name="SCRIPT_NAME" value="$PROJECT_DIR$/lib/google_search_html.py" />
     <option name="PARAMETERS" value="&quot;iPhone 16 Pro&quot;" />
     <option name="SHOW_COMMAND_LINE" value="false" />
     <option name="EMULATE_TERMINAL" value="false" />

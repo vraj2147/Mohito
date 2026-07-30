@@ -258,6 +258,51 @@ class Store:
                 ),
             )
 
+    def record_attempt_raw(self, o: dict) -> None:
+        """Insert an audit row from a scrape-outcome message.
+
+        ON CONFLICT DO NOTHING makes this idempotent: RabbitMQ guarantees at-least-
+        once delivery, so the same outcome can legitimately arrive twice and must
+        not raise or duplicate.
+        """
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO scrape_requests (
+                    request_id, batch_id, term_id, term, attempt, status,
+                    error_class, error_message, final_url,
+                    started_at, finished_at, duration_ms,
+                    html_path, html_bytes, html_sha256, headless, worker_id
+                ) VALUES (
+                    %(request_id)s, %(batch_id)s,
+                    %(term_id)s, %(term)s, %(attempt)s, %(status)s,
+                    %(error_class)s, %(error_message)s, %(final_url)s,
+                    %(started_at)s, now(), %(duration_ms)s,
+                    %(html_path)s, %(html_bytes)s, %(html_sha256)s, %(headless)s,
+                    %(worker_id)s
+                )
+                ON CONFLICT (request_id) DO NOTHING
+                """,
+                {
+                    "request_id": o["request_id"],
+                    "batch_id": o.get("batch_id"),
+                    "term_id": o.get("term_id"),
+                    "term": o["term"],
+                    "attempt": o.get("attempt", 1),
+                    "status": o["status"],
+                    "error_class": o.get("error_class"),
+                    "error_message": o.get("error_message"),
+                    "final_url": o.get("final_url"),
+                    "started_at": o.get("started_at"),
+                    "duration_ms": o.get("duration_ms"),
+                    "html_path": o.get("html_path"),
+                    "html_bytes": o.get("html_bytes"),
+                    "html_sha256": o.get("html_sha256"),
+                    "headless": o.get("headless"),
+                    "worker_id": o.get("worker_id"),
+                },
+            )
+
     def record_serp(self, request_id: uuid.UUID, ads) -> None:
         """Store the parsed per-SERP counts and the individual ads."""
         with self.conn.cursor() as cur:

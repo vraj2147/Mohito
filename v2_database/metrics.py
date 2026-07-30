@@ -13,7 +13,14 @@ was retrieved at all — its raw HTML on disk.
     python metrics.py --html <request_id>  # dump that request's raw HTML
 """
 
+
 from __future__ import annotations
+
+import sys as _sys, pathlib as _pl
+_ROOT = _pl.Path(__file__).resolve().parent.parent
+for _p in (str(_ROOT), str(_ROOT / "lib"), str(_ROOT / "v3_distributed")):
+    if _p not in _sys.path:
+        _sys.path.insert(0, _p)
 
 import argparse
 import sys

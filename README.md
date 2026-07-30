@@ -1,0 +1,211 @@
+# Google SERP Scraper
+
+Scrapes Google search results at volume, stores the raw HTML, and extracts
+sponsored placements (sponsored results and sponsored products) into Postgres.
+
+The repository is organised as three stages, kept side by side deliberately: each
+one solves a real problem the previous one hit, and the earlier stages still run.
+
+```
+lib/                shared modules used by every stage
+v1_sequential/      single process, files on disk
+v2_database/        single process, Postgres-backed queue and results
+v3_distributed/     RabbitMQ: three independent jobs, horizontally scalable
+```
+
+---
+
+## lib/ — shared foundation
+
+| Module | Role |
+|---|---|
+| `google_search_html.py` | single-query scraper; also the source of the Chrome headers, consent handling and scroll helper |
+| `google_session.py` | reusable browser session — one Chrome reused across many searches, with headless/headed switching and crash recovery |
+| `ad_extractor.py` | parses a SERP into sponsored results (`[data-text-ad]`) and sponsored products (`.pla-unit`) |
+| `db/store.py` | Postgres access: terms, runs, attempts, results |
+| `db/jobs.py` | job ledger for the distributed stage |
+| `db/schema.sql` + `db/migrations/` | schema and migrations |
+
+### Findings that shaped the design
+
+**Chrome-only headers belong on the navigation request only.** Putting
+`x-browser-*` and `Sec-Fetch-*` into `extra_http_headers` stamps them onto every
+subresource and XHR, producing fetch requests that claim `Sec-Fetch-Dest:
+document` — a contradiction no real browser makes.
+
+**Headless is not the real variable; profile warmth is.** A cold profile was
+CAPTCHA'd on request 1. After 74 successful requests warmed the same profile,
+headless ran 8/8 clean. Google's block decision leans on cookie history, so a
+persistent user-data dir matters more than the rendering mode.
+
+**Ads are JS-hydrated.** `#tads` is empty in the raw HTML, so a plain HTTP fetch
+returns a SERP with no ads at all. A browser is mandatory.
+
+**Two link shapes for ad destinations.** Most ads use Google's `/aclk?` click
+tracker, but some link straight to the advertiser. Matching only `aclk` silently
+lost the destination for 27% of sponsored results.
+
+---
+
+## v1_sequential — the straightforward version
+
+```bash
+python v1_sequential/batch_scrape.py \
+    --repeat-query "iPhone 16 Pro" --repeat 500 \
+    --query-file v1_sequential/queries.txt --total 1000
+```
+
+One process: read a query list, scrape, write HTML, append a row to
+`results.jsonl`, print a report at the end. Resume replays the JSONL.
+
+**Where it runs out of road:** the checkpoint file is the only record, so "what
+is left" means re-reading and diffing a log. Failures are strings rather than
+categories. Nothing else can query the results while a run is in progress.
+
+Real numbers from a 1000-request run: 800 ok, 200 errors, 0 CAPTCHAs, 1.9 GB of
+HTML. 180 of the 200 errors were consecutive `TargetClosedError` after the browser
+died around request 800 — a dead session that was never rebuilt, which is what
+motivated `GoogleSession.is_alive()`.
+
+---
+
+## v2_database — Postgres as the source of truth
+
+```bash
+python v2_database/seed_terms.py --distinct 1000 --repeat-term "iPhone 16 Pro" --repeats 500
+caffeinate -i python v2_database/batch_scrape_db.py
+python v2_database/metrics.py --ads --errors
+python v2_database/reextract.py --run 8 9
+```
+
+The work queue moves into `search_terms`, and every attempt becomes a row in
+`scrape_requests`.
+
+* **One row per attempt, not per success.** A block rate cannot be measured if
+  blocked requests leave no trace.
+* **`request_id` (uuid4) is generated before the network call** and names the HTML
+  file on disk, so a row and its page share one key even if the insert later fails.
+* **Resume is a SQL view.** `v_pending_work` diffs `target_repeats` against
+  successful attempts — no checkpoint file to keep in sync.
+* **Status is a constrained enum** (`ok`, `captcha`, `nav_timeout`, …) so failures
+  aggregate; free text is kept only for forensics.
+* **HTML is gzipped** — measured 77% saving.
+
+`reextract.py` replays saved HTML into the database, so an extractor fix applies
+retroactively without re-scraping. That is how the 27% missing destination URLs
+were repaired across already-collected runs.
+
+**Where it runs out of road:** still one process doing everything in sequence. A
+parser change means re-running the scraper's own loop, and throughput is capped by
+a single browser.
+
+---
+
+## v3_distributed — three jobs over RabbitMQ
+
+```bash
+brew services start rabbitmq
+
+python v3_distributed/loader.py --distinct --limit 500      # 1. fill the queue
+python v3_distributed/scraper_worker.py --worker-id w1      # 2. scrape (N workers)
+python v3_distributed/extractor_worker.py                   # 3. extract + store
+
+python v3_distributed/loader.py --status                    # ledger + queue depths
+python v3_distributed/loader.py --reclaim                   # recover dead workers
+python v3_distributed/loader.py --resume                    # republish pending
+```
+
+```
+loader ──► scrape.jobs ──► scraper_worker ──► extract.jobs ──► extractor_worker
+              ▲                  │                                   │
+              │                  ▼                                   ▼
+        scrape.retry ◄── failure (TTL backoff)              Postgres results
+              │
+              ▼
+        scrape.dead (attempts exhausted)
+```
+
+### The failure-visibility problem
+
+A clean split would have the scraper touch no database at all. That breaks the
+moment a worker is killed mid-request: the job then exists only as an unacked AMQP
+message, and there is no way to ask what is in flight.
+
+The fix is a **job ledger** (`scrape_jobs`). RabbitMQ dispatches; Postgres records.
+The scraper writes exactly two rows — claim before, outcome after — costing ~0.3ms
+against an ~11s scrape, and three questions always have exact answers:
+
+```sql
+SELECT * FROM v_batch_progress;   -- done / waiting / in_flight / dead
+SELECT * FROM v_stuck_jobs;       -- workers that died holding a lease
+```
+
+### Production details
+
+* **Manual ack, `prefetch=1`.** The message is acked only after the HTML is on
+  disk and the outcome is published.
+* **Leases.** A claim sets `lease_expires_at`; `--reclaim` returns expired jobs to
+  the retry pool. This covers the case AMQP redelivery cannot: a process that
+  acked but then died.
+* **Delayed retry via TTL queue**, not `nack(requeue=True)` — an immediate requeue
+  against a rate-limiting target becomes a hot loop.
+* **Durable queues, persistent messages**, so a broker restart loses nothing.
+* **Idempotent writes.** `ON CONFLICT DO NOTHING` on the audit row, because AMQP
+  is at-least-once and the same outcome can legitimately arrive twice.
+* **One Chrome profile per worker** — the profile lock is exclusive, so
+  `--worker-id` selects the profile directory.
+
+### Verified crash recovery
+
+Killing a worker with `SIGKILL` mid-scrape:
+
+```
+1 in_flight  (stranded, worker_id recorded)   5 queued
+→ lease expires, job appears in v_stuck_jobs with overdue_by
+→ loader.py --reclaim  →  "Reclaimed 1 expired job(s): 1 requeued, 0 dead"
+→ 6 queued
+```
+
+Nothing lost, and the stranded job was visible and attributable the whole time.
+
+### Honest limits
+
+Horizontal scaling is real but **blocking is the binding constraint, not
+throughput**. Four workers from one IP get blocked roughly four times faster;
+this architecture pays off with residential proxies, one per worker. Extraction is
+~0.2s of an ~11s request, so moving it to a separate process buys decoupling and
+independent redeploy, not speed.
+
+---
+
+## Setup
+
+```bash
+python -m venv .venv && .venv/bin/pip install -r requirements.txt
+.venv/bin/playwright install chromium
+
+brew services start postgresql@14
+createdb google_scraper
+psql -d google_scraper -f lib/db/schema.sql
+for f in lib/db/migrations/*.sql; do psql -d google_scraper -f "$f"; done
+
+brew services start rabbitmq        # v3 only
+```
+
+Environment: `SCRAPER_DSN` (default `postgresql:///google_scraper`),
+`SCRAPER_AMQP_URL` (default `amqp://guest:guest@localhost:5672/%2F`).
+
+## Measured performance
+
+| | |
+|---|---|
+| Per successful scrape | ~11s wall |
+| — artificial delay | ~5.5s (62% of wall time) |
+| — `scroll_to_bottom` | ~2.2s (58% of browser time) |
+| — navigation | ~0.7s |
+| — parse + gzip + DB | ~0.3s |
+| Database round-trip | 0.13ms (≈0.005% of a request) |
+| gzip saving on HTML | 77% |
+
+The two levers that matter are the inter-request delay and the scroll; the
+database and parsing are noise.
