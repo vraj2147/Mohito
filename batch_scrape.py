@@ -131,9 +131,14 @@ def run_batch(args) -> list[dict]:
                 remaining.append(q)
         print(f"Resuming: {sum(done.values())} already done, {len(remaining)} left.")
         jobs = remaining
+        if not jobs:
+            # Nothing outstanding — report on what is already on disk rather than
+            # starting a browser just to close it again.
+            print("Nothing left to scrape.")
+            return prior_rows
 
     print(f"Workload: {len(jobs)} requests over {len(set(jobs))} distinct queries.")
-    print(f"Output:   {results_path}")
+    print(f"Output:   {results_path}", flush=True)
 
     signal.signal(signal.SIGINT, _handle_sigint)
 
@@ -217,10 +222,13 @@ def run_batch(args) -> list[dict]:
             if i % args.progress_every == 0 or i == len(jobs):
                 rate = stats["ok"] / max(1, i)
                 elapsed = time.time() - started
+                # flush: stdout is block-buffered when redirected to a file, so without
+                # this a long unattended run leaves its log empty until the very end.
                 print(
                     f"[{i}/{len(jobs)}] ok={stats['ok']} captcha={stats['captcha']} "
                     f"err={stats['error']} | success {rate:.0%} | "
-                    f"{elapsed / max(1, i):.1f}s/req"
+                    f"{elapsed / max(1, i):.1f}s/req",
+                    flush=True,
                 )
 
             # Escalate headless -> headed before falling back to pure backoff. A
