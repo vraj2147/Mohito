@@ -117,6 +117,14 @@ def run(args) -> int:
                     status, err_cls, err_msg = classify_error(exc)
                     extra.update(error_class=err_cls, error_message=err_msg)
                     html = None
+                    # Persist a block page if one came back, so the row still points
+                    # at something inspectable.
+                    failed_html = getattr(exc, "html", None)
+                    if failed_html:
+                        extra["html"] = write_html(
+                            failed_html, html_root / status, request_id, slugify(term),
+                            compress=not args.no_compress,
+                        )
 
                 store.record_attempt(
                     request_id=request_id,

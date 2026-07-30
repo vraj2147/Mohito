@@ -51,15 +51,26 @@ class GoogleSession:
             self._nav_headers["X-Browser-Validation"] = browser_validation
 
         self._stealth = None
+        self._pw_cm = None
         self._pw = None
         self._context = None
         self._page = None
 
     def __enter__(self) -> "GoogleSession":
         self.profile_dir.mkdir(parents=True, exist_ok=True)
+        # The Playwright driver is started ONCE per session and deliberately
+        # outlives individual browser contexts. sync_playwright() cannot be
+        # re-entered in the same thread — a second attempt raises "Sync API inside
+        # the asyncio loop" — so restart() must reuse this driver rather than
+        # tearing the whole stack down.
         self._stealth = Stealth()
-        self._pw = self._stealth.use_sync(sync_playwright()).__enter__()
+        self._pw_cm = self._stealth.use_sync(sync_playwright())
+        self._pw = self._pw_cm.__enter__()
+        self._open_context()
+        return self
 
+    def _open_context(self) -> None:
+        """Launch the browser context and page from the already-running driver."""
         launch_kwargs = {
             "user_data_dir": str(self.profile_dir),
             "headless": self.headless,
@@ -86,36 +97,40 @@ class GoogleSession:
         self._context.route("**/*", _add_nav_headers)
         self._context.add_init_script(STEALTH_INIT_SCRIPT)
         self._page = self._context.pages[0] if self._context.pages else self._context.new_page()
-        return self
 
     def __exit__(self, *exc) -> None:
         self.close()
 
-    def restart(self, headless: bool | None = None) -> "GoogleSession":
-        """Tear the browser down and bring it back up, optionally switching modes.
-
-        Used to escalate from headless to headed after Google starts blocking:
-        headless Chrome is the strongest bot signal it keys on, so a visible window
-        will often clear an interstitial that no amount of backoff will.
-        """
-        self.close()
-        if headless is not None:
-            self.headless = headless
-        self._consent_done = False
-        return self.__enter__()
-
-    def close(self) -> None:
+    def _close_context(self) -> None:
         if self._context is not None:
             try:
                 self._context.close()
             except Exception:
                 pass
+        self._context = self._page = None
+
+    def restart(self, headless: bool | None = None) -> "GoogleSession":
+        """Replace the browser context, optionally switching headless/headed.
+
+        Only the context is recycled; the Playwright driver stays up. Used to
+        escalate to headed when Google starts blocking, to drop back to headless
+        once it is healthy again, and to recover from a crashed browser.
+        """
+        self._close_context()
+        if headless is not None:
+            self.headless = headless
+        self._consent_done = False
+        self._open_context()
+        return self
+
+    def close(self) -> None:
+        self._close_context()
         if self._pw is not None:
             try:
-                self._pw.__exit__(None, None, None)
+                self._pw_cm.__exit__(None, None, None)
             except Exception:
                 pass
-        self._context = self._pw = self._page = None
+        self._pw = self._pw_cm = None
 
     @property
     def current_url(self) -> str:
@@ -173,5 +188,10 @@ class GoogleSession:
 
         html = page.content()
         if is_captcha_page(html):
-            raise CaptchaError(Path(f"<in-memory:{query}>"))
+            # Carry the block page on the exception so the caller can persist it.
+            # A CAPTCHA is the most interesting page in a run to be able to inspect
+            # later, and it is the one page that never reaches the normal save path.
+            err = CaptchaError(Path(f"captcha:{query}"))
+            err.html = html
+            raise err
         return html
