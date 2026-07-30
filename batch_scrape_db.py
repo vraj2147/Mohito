@@ -74,6 +74,12 @@ def run(args) -> int:
 
     counts: dict[str, int] = {}
     consecutive_captchas = 0
+    consecutive_ok = 0
+    escalations = 0
+    # Headless is the cheap mode (no window, no display needed). `prefer_headless`
+    # means "keep going back to it"; --headed opts out and stays visible throughout.
+    prefer_headless = not args.headed
+    headless_retry_after = args.deescalate_after
     started = time.time()
     session = GoogleSession(
         headless=not args.headed,
@@ -138,12 +144,39 @@ def run(args) -> int:
 
                 if status == "ok" or status == "empty_serp":
                     consecutive_captchas = 0
+                    consecutive_ok += 1
+                    # Drop back to headless once the run looks healthy again, so an
+                    # escalation is a temporary rescue rather than a one-way door.
+                    # The threshold doubles each time headless fails again, so a
+                    # host where headless never works stops paying the retry cost
+                    # instead of oscillating every few dozen requests.
+                    if (
+                        prefer_headless
+                        and not session.headless
+                        and consecutive_ok >= headless_retry_after
+                    ):
+                        print(
+                            f"  {consecutive_ok} clean requests — trying headless again.",
+                            file=sys.stderr,
+                        )
+                        session.restart(headless=True)
+                        consecutive_ok = 0
                     break
 
                 if status == "captcha":
                     consecutive_captchas += 1
+                    consecutive_ok = 0
                     if consecutive_captchas >= args.escalate_after and session.headless:
-                        print("  CAPTCHA in headless — relaunching headed.", file=sys.stderr)
+                        headless_retry_after = min(
+                            args.max_headless_retry_after, headless_retry_after * 2
+                        ) if escalations else args.deescalate_after
+                        escalations += 1
+                        print(
+                            f"  CAPTCHA in headless — relaunching headed "
+                            f"(escalation #{escalations}; will retry headless after "
+                            f"{headless_retry_after} clean requests).",
+                            file=sys.stderr,
+                        )
                         session.restart(headless=False)
                         consecutive_captchas = 0
                     else:
@@ -211,6 +244,11 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--max-backoff", type=float, default=900.0)
     ap.add_argument("--escalate-after", type=int, default=2,
                     help="Consecutive CAPTCHAs before switching headless->headed.")
+    ap.add_argument("--deescalate-after", type=int, default=20,
+                    help="Clean requests before dropping headed->headless again (default 20). "
+                         "Doubles after each further escalation.")
+    ap.add_argument("--max-headless-retry-after", type=int, default=320,
+                    help="Ceiling for the headless retry threshold (default 320).")
     ap.add_argument("--progress-every", type=int, default=25)
 
     ap.add_argument("--headed", action="store_true", help="Visible window (far less likely to be blocked).")
