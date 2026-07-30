@@ -12,6 +12,7 @@ like a real user than a thousand cold browser launches.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
@@ -39,11 +40,13 @@ class GoogleSession:
         profile_dir: Path = DEFAULT_PROFILE_DIR,
         browser_validation: str | None = None,
         scroll: bool = True,
+        launch_timeout_ms: int = 60000,
     ):
         self.headless = headless
         self.reject_cookies = reject_cookies
         self.profile_dir = Path(profile_dir)
         self.scroll = scroll
+        self.launch_timeout_ms = launch_timeout_ms
         self._consent_done = False
 
         self._nav_headers = dict(NAV_ONLY_HEADERS)
@@ -70,10 +73,18 @@ class GoogleSession:
         return self
 
     def _open_context(self) -> None:
-        """Launch the browser context and page from the already-running driver."""
+        """Launch the browser context and page from the already-running driver.
+
+        A headed launch needs a window-server connection, which a detached or
+        subprocess-spawned worker may not have. Playwright then blocks rather than
+        erroring, so the launch carries an explicit timeout and falls back to
+        headless: a worker that keeps scraping headless is far better than one
+        hung forever waiting for a window.
+        """
         launch_kwargs = {
             "user_data_dir": str(self.profile_dir),
             "headless": self.headless,
+            "timeout": self.launch_timeout_ms,
             "args": [
                 "--disable-blink-features=AutomationControlled",
                 "--disable-features=IsolateOrigins,site-per-process",
@@ -84,9 +95,16 @@ class GoogleSession:
             "extra_http_headers": dict(CHROME_HEADERS),
         }
         try:
-            self._context = self._pw.chromium.launch_persistent_context(channel="chrome", **launch_kwargs)
-        except Exception:
-            self._context = self._pw.chromium.launch_persistent_context(user_agent=CHROME_UA, **launch_kwargs)
+            self._context = self._launch(launch_kwargs)
+        except Exception as exc:
+            if not launch_kwargs["headless"]:
+                print(f"headed launch failed ({type(exc).__name__}) — falling back to headless",
+                      file=sys.stderr)
+                self.headless = True
+                launch_kwargs["headless"] = True
+                self._context = self._launch(launch_kwargs)
+            else:
+                raise
 
         def _add_nav_headers(route, request):
             if request.resource_type == "document" and request.is_navigation_request():
@@ -97,6 +115,12 @@ class GoogleSession:
         self._context.route("**/*", _add_nav_headers)
         self._context.add_init_script(STEALTH_INIT_SCRIPT)
         self._page = self._context.pages[0] if self._context.pages else self._context.new_page()
+
+    def _launch(self, launch_kwargs: dict):
+        try:
+            return self._pw.chromium.launch_persistent_context(channel="chrome", **launch_kwargs)
+        except Exception:
+            return self._pw.chromium.launch_persistent_context(user_agent=CHROME_UA, **launch_kwargs)
 
     def __exit__(self, *exc) -> None:
         self.close()

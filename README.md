@@ -135,6 +135,10 @@ a single browser.
 brew services start rabbitmq
 
 python seed_terms.py --distinct 1000                        # 0. fill search_terms
+python v3_distributed/warm_profiles.py --workers 2 --headed # 0b. warm each profile
+python v3_distributed/pipeline.py --distinct --limit 500 --workers 2   # all three, supervised
+
+# or run the stages by hand
 python v3_distributed/loader.py --distinct --limit 500      # 1. fill the queue
 python v3_distributed/scraper_worker.py --worker-id w1      # 2. scrape (N workers)
 python v3_distributed/extractor_worker.py                   # 3. extract + store
@@ -196,6 +200,47 @@ Killing a worker with `SIGKILL` mid-scrape:
 ```
 
 Nothing lost, and the stranded job was visible and attributable the whole time.
+
+### Cold profiles are the real cost of a new worker
+
+Chrome's profile lock is exclusive, so every worker needs its own user-data dir
+(`--worker-id` selects it). A brand-new profile is CAPTCHA'd almost immediately: in
+a two-worker run, w1 (warm) scraped 13 pages while w2 (fresh) failed on its first
+request and never recovered. `warm_profiles.py` walks each profile through ordinary
+searches until it strings together clean requests. After warming, the same two
+workers completed a 40-job batch with 3 CAPTCHAs between them.
+
+### Supervision has to detect hung workers, not just dead ones
+
+The first full run stalled at 13/40 with both workers alive and idle. They had
+escalated to headed, and a headed launch needs a window-server connection that a
+subprocess-spawned worker does not have — Playwright blocked instead of erroring.
+Three changes came out of that:
+
+* `GoogleSession` launches with an explicit timeout and falls back to headless
+  when a headed launch fails.
+* Pipeline-spawned workers get `--no-escalate` and back off instead, since headed
+  cannot work detached.
+* The supervisor judges liveness from `scrape_requests.started_at` per worker and
+  restarts anything silent past `--stall-seconds`. Process liveness alone misses a
+  frozen worker entirely.
+
+### Verified full run
+
+40 jobs, 2 workers, resumed from a partially complete batch:
+
+```
+ batch  loaded  extracted   left  in_flight  to_extract   dead    pct
+     3      40         40      0          0           0      0 100.0%
+
+  ok       41   avg  3711ms   2 workers
+  captcha   3   avg 11541ms   2 workers
+  unknown   1
+  total    45   40 distinct terms   101 MB html
+```
+
+45 attempts for 40 jobs: the failures were retried through the TTL queue and all
+recovered, none dead.
 
 ### Honest limits
 

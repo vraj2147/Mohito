@@ -39,11 +39,24 @@ from db.jobs import JobStore
 from db.store import read_html
 
 _STOP = False
+_CONN = None
+_CHANNEL = None
 
 
 def _handle_signal(signum, frame):
+    """Break out of start_consuming() promptly.
+
+    pika's blocking consumer sits in a socket read, so setting a flag alone leaves
+    an idle worker hanging until the next message. add_callback_threadsafe is the
+    supported way to interrupt it from a signal handler.
+    """
     global _STOP
     _STOP = True
+    if _CONN is not None and _CHANNEL is not None:
+        try:
+            _CONN.add_callback_threadsafe(_CHANNEL.stop_consuming)
+        except Exception:
+            pass
     print("\nFinishing current message, then exiting…", file=sys.stderr)
 
 
@@ -126,8 +139,10 @@ def main() -> int:
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
+    global _CONN, _CHANNEL
     conn = mq.connect(args.amqp_url)
     channel = conn.channel()
+    _CONN, _CHANNEL = conn, channel
     mq.declare_topology(channel)
     channel.basic_qos(prefetch_count=args.prefetch)
 

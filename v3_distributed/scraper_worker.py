@@ -44,11 +44,24 @@ from google_search_html import slugify
 from google_session import GoogleSession
 
 _STOP = False
+_CONN = None
+_CHANNEL = None
 
 
 def _handle_signal(signum, frame):
+    """Break out of start_consuming() promptly.
+
+    pika's blocking consumer sits in a socket read, so setting a flag alone leaves
+    an idle worker hanging until the next message. add_callback_threadsafe is the
+    supported way to interrupt it from a signal handler.
+    """
     global _STOP
     _STOP = True
+    if _CONN is not None and _CHANNEL is not None:
+        try:
+            _CONN.add_callback_threadsafe(_CHANNEL.stop_consuming)
+        except Exception:
+            pass
     print("\nFinishing current job, then exiting…", file=sys.stderr)
 
 
@@ -103,7 +116,8 @@ class Worker:
         if status == "captcha":
             self.consecutive_captchas += 1
             self.consecutive_ok = 0
-            if self.consecutive_captchas >= self.args.escalate_after and self.session.headless:
+            if (self.consecutive_captchas >= self.args.escalate_after
+                    and self.session.headless and not self.args.no_escalate):
                 self.headless_retry_after = (
                     min(self.args.max_headless_retry_after, self.headless_retry_after * 2)
                     if self.escalations else self.args.deescalate_after
@@ -113,6 +127,10 @@ class Worker:
                       f"(retry headless after {self.headless_retry_after} clean)", file=sys.stderr)
                 self.session.restart(headless=False)
                 self.consecutive_captchas = 0
+            else:
+                backoff = min(600.0, self.args.captcha_backoff * self.consecutive_captchas)
+                print(f"  [{self.worker_id}] CAPTCHA — backing off {backoff:.0f}s", file=sys.stderr)
+                time.sleep(backoff)
             return
 
         if status == "browser_crash" or not self.session.is_alive():
@@ -226,6 +244,12 @@ def main() -> int:
     ap.add_argument("--accept-cookies", action="store_true")
     ap.add_argument("--browser-validation", default=None)
     ap.add_argument("--escalate-after", type=int, default=2)
+    ap.add_argument("--no-escalate", action="store_true",
+                    help="Never switch to a headed window; back off and stay headless. "
+                         "Required when running detached (no window server), where a "
+                         "headed launch cannot succeed.")
+    ap.add_argument("--captcha-backoff", type=float, default=45.0,
+                    help="Seconds to pause after a CAPTCHA when not escalating.")
     ap.add_argument("--deescalate-after", type=int, default=20)
     ap.add_argument("--max-headless-retry-after", type=int, default=320)
     args = ap.parse_args()
@@ -239,8 +263,10 @@ def main() -> int:
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
+    global _CONN, _CHANNEL
     conn = mq.connect(args.amqp_url)
     channel = conn.channel()
+    _CONN, _CHANNEL = conn, channel
     mq.declare_topology(channel)
     # One unacked message at a time: a worker must not hoard jobs it cannot start,
     # because every held job is invisible to other workers until acked.
