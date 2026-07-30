@@ -117,6 +117,28 @@ class GoogleSession:
                 pass
         self._context = self._pw = self._page = None
 
+    @property
+    def current_url(self) -> str:
+        try:
+            return self._page.url if self._page else ""
+        except Exception:
+            return ""
+
+    def is_alive(self) -> bool:
+        """True when the browser is still usable.
+
+        A crashed or externally-closed Chrome leaves the context object in place but
+        every operation on it raises TargetClosedError, so liveness has to be probed
+        rather than assumed.
+        """
+        if self._context is None or self._page is None:
+            return False
+        try:
+            self._page.evaluate("() => 1")
+            return True
+        except Exception:
+            return False
+
     def search(self, query: str, timeout_ms: int = 30000) -> str:
         """Run one search and return the rendered HTML.
 
