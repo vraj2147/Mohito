@@ -269,12 +269,12 @@ class Store:
             cur.execute(
                 """
                 INSERT INTO scrape_requests (
-                    request_id, batch_id, term_id, term, attempt, status,
+                    request_id, job_id, batch_id, term_id, term, attempt, status,
                     error_class, error_message, final_url,
                     started_at, finished_at, duration_ms,
                     html_path, html_bytes, html_sha256, headless, worker_id
                 ) VALUES (
-                    %(request_id)s, %(batch_id)s,
+                    %(request_id)s, %(job_id)s, %(batch_id)s,
                     %(term_id)s, %(term)s, %(attempt)s, %(status)s,
                     %(error_class)s, %(error_message)s, %(final_url)s,
                     %(started_at)s, now(), %(duration_ms)s,
@@ -285,6 +285,7 @@ class Store:
                 """,
                 {
                     "request_id": o["request_id"],
+                    "job_id": o.get("job_id"),
                     "batch_id": o.get("batch_id"),
                     "term_id": o.get("term_id"),
                     "term": o["term"],

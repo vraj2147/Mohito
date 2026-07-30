@@ -86,17 +86,32 @@ class JobStore(Store):
         return self.query(sql + " ORDER BY created_at", params)
 
     def claim(self, job_id: uuid.UUID, worker_id: str, lease_seconds: int = 300) -> dict | None:
-        """Take ownership of a job. Returns None when another worker already holds
-        it or it is already finished, which is how a redelivered message is
-        rejected instead of scraped twice."""
+        """Take ownership of a job, or return None if it is not ours to take.
+
+        An `in_flight` job is claimable only once its lease has expired. Accepting
+        `in_flight` unconditionally let a duplicate delivery hand the same job to a
+        second worker while the first was still scraping it — observed as one job
+        with three attempts split across two workers.
+
+        FOR UPDATE serialises two workers racing on the same row, so exactly one
+        wins the claim.
+        """
         expires = datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)
         rows = self.query(
-            """UPDATE scrape_jobs
+            """WITH claimable AS (
+                   SELECT job_id FROM scrape_jobs
+                   WHERE  job_id = %s
+                     AND  (status IN ('pending','queued','retry')
+                           OR (status = 'in_flight' AND lease_expires_at < now()))
+                   FOR UPDATE
+               )
+               UPDATE scrape_jobs j
                SET status='in_flight', worker_id=%s, lease_expires_at=%s,
                    attempts=attempts+1, updated_at=now()
-               WHERE job_id=%s AND status IN ('pending','queued','retry','in_flight')
-               RETURNING job_id, term, term_id, locale, attempts, max_attempts""",
-            (worker_id, expires, job_id),
+               FROM claimable c
+               WHERE j.job_id = c.job_id
+               RETURNING j.job_id, j.term, j.term_id, j.locale, j.attempts, j.max_attempts""",
+            (job_id, worker_id, expires),
         )
         return rows[0] if rows else None
 
