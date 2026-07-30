@@ -89,11 +89,11 @@ CREATE INDEX IF NOT EXISTS idx_requests_sha     ON scrape_requests (html_sha256)
 CREATE TABLE IF NOT EXISTS serp_results (
     request_id     uuid    PRIMARY KEY
                            REFERENCES scrape_requests (request_id) ON DELETE CASCADE,
-    text_ad_count  integer NOT NULL DEFAULT 0,
-    pla_count      integer NOT NULL DEFAULT 0,
-    total_ads      integer NOT NULL DEFAULT 0,
-    top_text_ads   integer NOT NULL DEFAULT 0,
-    organic_count  integer NOT NULL DEFAULT 0
+    sponsored_result_count  integer NOT NULL DEFAULT 0,
+    sponsored_product_count integer NOT NULL DEFAULT 0,
+    total_ads               integer NOT NULL DEFAULT 0,
+    top_sponsored_results   integer NOT NULL DEFAULT 0,
+    organic_count           integer NOT NULL DEFAULT 0
 );
 
 -- ------------------------------------------------------------ individual ads
@@ -101,11 +101,11 @@ CREATE TABLE IF NOT EXISTS serp_ads (
     id              bigserial PRIMARY KEY,
     request_id      uuid    NOT NULL
                             REFERENCES scrape_requests (request_id) ON DELETE CASCADE,
-    ad_type         text    NOT NULL CHECK (ad_type IN ('text', 'pla')),
+    ad_type         text    NOT NULL CHECK (ad_type IN ('sponsored_result', 'sponsored_product')),
     placement       text,
     slot            integer,
     title           text,
-    advertiser      text,   -- text-ad advertiser domain, or PLA merchant name
+    advertiser      text,
     price           text,
     destination_url text
 );
@@ -163,10 +163,10 @@ GROUP   BY s.id, s.run_uuid, s.started_at, s.finished_at;
 CREATE OR REPLACE VIEW v_ad_rates AS
 SELECT  q.term,
         count(*)                                                AS serps,
-        round(100.0 * count(*) FILTER (WHERE v.text_ad_count > 0) / count(*), 1) AS text_ad_rate_pct,
-        round(100.0 * count(*) FILTER (WHERE v.pla_count      > 0) / count(*), 1) AS pla_rate_pct,
-        round(avg(v.text_ad_count), 2)                          AS avg_text_ads,
-        round(avg(v.pla_count), 2)                              AS avg_plas,
+        round(100.0 * count(*) FILTER (WHERE v.sponsored_result_count > 0) / count(*), 1) AS sponsored_result_rate_pct,
+        round(100.0 * count(*) FILTER (WHERE v.sponsored_product_count      > 0) / count(*), 1) AS sponsored_product_rate_pct,
+        round(avg(v.sponsored_result_count), 2)                          AS avg_sponsored_results,
+        round(avg(v.sponsored_product_count), 2)                              AS avg_sponsored_products,
         round(avg(v.organic_count), 2)                          AS avg_organic
 FROM    scrape_requests q
 JOIN    serp_results v ON v.request_id = q.request_id

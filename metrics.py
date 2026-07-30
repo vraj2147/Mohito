@@ -9,7 +9,7 @@ was retrieved at all — its raw HTML on disk.
     python metrics.py --run 2              # a specific run
     python metrics.py --errors             # per-request failure list
     python metrics.py --errors --status captcha
-    python metrics.py --ads                # ad rates by intent and term
+    python metrics.py --ads                # sponsored rates by intent and term
     python metrics.py --html <request_id>  # dump that request's raw HTML
 """
 
@@ -109,18 +109,18 @@ def show_errors(store: Store, run_id: int, status: str | None, limit: int) -> No
 
 
 def show_ads(store: Store, run_id: int) -> None:
-    print("\nAD RATE BY INTENT")
+    print("\nSPONSORED RATE BY INTENT")
     print("-" * 78)
-    print(f"{'intent':<16}{'serps':>7}{'text%':>8}{'pla%':>8}{'txt/serp':>10}{'pla/serp':>10}")
+    print(f"{'intent':<16}{'serps':>7}{'sp_res%':>9}{'sp_prod%':>10}{'res/serp':>10}{'prod/serp':>11}")
     print("-" * 78)
     for r in store.query(
         """
         SELECT COALESCE(t.intent, 'unknown')                                   AS intent,
                count(*)                                                        AS serps,
-               round(100.0 * count(*) FILTER (WHERE v.text_ad_count > 0) / count(*), 1) AS text_pct,
-               round(100.0 * count(*) FILTER (WHERE v.pla_count      > 0) / count(*), 1) AS pla_pct,
-               round(avg(v.text_ad_count), 2)                                  AS avg_text,
-               round(avg(v.pla_count), 2)                                      AS avg_pla
+               round(100.0 * count(*) FILTER (WHERE v.sponsored_result_count > 0) / count(*), 1) AS sp_res_pct,
+               round(100.0 * count(*) FILTER (WHERE v.sponsored_product_count      > 0) / count(*), 1) AS sp_prod_pct,
+               round(avg(v.sponsored_result_count), 2)                                  AS avg_res,
+               round(avg(v.sponsored_product_count), 2)                                      AS avg_prod
         FROM   scrape_requests q
         JOIN   serp_results  v ON v.request_id = q.request_id
         LEFT   JOIN search_terms t ON t.id = q.term_id
@@ -130,8 +130,8 @@ def show_ads(store: Store, run_id: int) -> None:
         (run_id,),
     ):
         print(
-            f"{r['intent']:<16}{r['serps']:>7}{r['text_pct']:>8}{r['pla_pct']:>8}"
-            f"{r['avg_text']:>10}{r['avg_pla']:>10}"
+            f"{r['intent']:<16}{r['serps']:>7}{r['sp_res_pct']:>9}{r['sp_prod_pct']:>10}"
+            f"{r['avg_res']:>10}{r['avg_prod']:>11}"
         )
 
     print("\nTOP ADVERTISERS / MERCHANTS")
@@ -143,7 +143,71 @@ def show_ads(store: Store, run_id: int) -> None:
            GROUP  BY 1, 2 ORDER BY n DESC LIMIT 15""",
         (run_id,),
     ):
-        print(f"  {r['ad_type']:<6}{r['advertiser'][:46]:<48}{r['n']:>7}")
+        print(f"  {r['ad_type']:<20}{r['advertiser'][:40]:<42}{r['n']:>7}")
+
+
+def compare_runs(store: Store, run_ids: list[int]) -> None:
+    """Put runs side by side. Built for the breadth-vs-repeat comparison: a batch
+    of distinct terms and a batch repeating one term stress different things —
+    breadth samples many SERP shapes, repeats measure how stable one SERP is."""
+    rows = store.query(
+        """
+        SELECT q.run_id,
+               s.notes,
+               count(*)                                            AS attempts,
+               count(*) FILTER (WHERE q.status = 'ok')             AS ok,
+               count(*) FILTER (WHERE q.status = 'captcha')        AS captcha,
+               count(DISTINCT q.term)                              AS terms,
+               round(avg(q.duration_ms) FILTER (WHERE q.status='ok'))  AS avg_ms,
+               count(*) FILTER (WHERE q.status='ok' AND NOT q.headless) AS headed_ok,
+               round(avg(v.sponsored_result_count), 2)                      AS avg_sponsored_results,
+               round(avg(v.sponsored_product_count), 2)                          AS avg_sponsored_products,
+               round(100.0 * count(*) FILTER (WHERE v.sponsored_result_count > 0)
+                     / NULLIF(count(v.request_id), 0), 1)          AS sponsored_result_rate,
+               round(100.0 * count(*) FILTER (WHERE v.sponsored_product_count > 0)
+                     / NULLIF(count(v.request_id), 0), 1)          AS sponsored_product_rate,
+               round(stddev_samp(v.sponsored_product_count), 2)                  AS sponsored_product_stddev,
+               round(stddev_samp(v.sponsored_result_count), 2)              AS sponsored_result_stddev
+        FROM   scrape_requests q
+        JOIN   scrape_runs s ON s.id = q.run_id
+        LEFT   JOIN serp_results v ON v.request_id = q.request_id
+        WHERE  q.run_id = ANY(%s)
+        GROUP  BY q.run_id, s.notes ORDER BY q.run_id
+        """,
+        (run_ids,),
+    )
+    if not rows:
+        print("No matching runs.", file=sys.stderr)
+        return
+
+    labels = [f"run {r['run_id']}" for r in rows]
+    print("=" * (26 + 18 * len(rows)))
+    print("RUN COMPARISON")
+    print("=" * (26 + 18 * len(rows)))
+    print(f"{'':<26}" + "".join(f"{l:>18}" for l in labels))
+    print("-" * (26 + 18 * len(rows)))
+
+    def line(label, key, fmt="{}"):
+        print(f"{label:<26}" + "".join(
+            f"{(fmt.format(r[key]) if r[key] is not None else '-'):>18}" for r in rows
+        ))
+
+    for r in rows:
+        pass
+    print(f"{'notes':<26}" + "".join(f"{(r['notes'] or '')[:17]:>18}" for r in rows))
+    line("distinct terms", "terms")
+    line("attempts", "attempts")
+    line("ok", "ok")
+    line("captcha", "captcha")
+    line("ok via headed", "headed_ok")
+    line("avg ok duration (ms)", "avg_ms")
+    print("-" * (26 + 18 * len(rows)))
+    line("sponsored result rate %", "sponsored_result_rate")
+    line("sponsored product rate %", "sponsored_product_rate")
+    line("avg sponsored results/SERP", "avg_sponsored_results")
+    line("avg sponsored products/SERP", "avg_sponsored_products")
+    line("sponsored result stddev", "sponsored_result_stddev")
+    line("sponsored product stddev", "sponsored_product_stddev")
 
 
 def main() -> int:
@@ -156,9 +220,14 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=40, help="Rows for --errors.")
     ap.add_argument("--html", default=None, metavar="REQUEST_ID",
                     help="Print the raw HTML stored for one request_id.")
+    ap.add_argument("--compare", type=int, nargs="+", metavar="RUN_ID",
+                    help="Compare two or more runs side by side.")
     args = ap.parse_args()
 
     with Store(args.dsn) as store:
+        if args.compare:
+            compare_runs(store, args.compare)
+            return 0
         if args.html:
             html = store.get_html(args.html)
             if html is None:

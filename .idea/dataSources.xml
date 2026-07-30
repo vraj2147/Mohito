@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="DataSourceManagerImpl" format="xml" multifile-model="true">
+    <data-source source="LOCAL" name="google_scraper@localhost" uuid="6cbf5965-0a56-4e3e-be08-fe5eb5aa3634">
+      <driver-ref>postgresql</driver-ref>
+      <synchronize>true</synchronize>
+      <jdbc-driver>org.postgresql.Driver</jdbc-driver>
+      <jdbc-url>jdbc:postgresql://localhost:5432/google_scraper</jdbc-url>
+      <working-dir>$ProjectFileDir$</working-dir>
+      <!-- Without this, IntelliJ connects and lists the schema but introspects no
+           tables, so the tree looks empty. -->
+      <schema-mapping>
+        <introspection-scope>
+          <node kind="database" qname="google_scraper">
+            <node kind="schema" qname="public"/>
+          </node>
+        </introspection-scope>
+      </schema-mapping>
+    </data-source>
+  </component>
+</project>

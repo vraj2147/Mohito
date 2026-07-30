@@ -2,11 +2,11 @@
 
 Two ad formats are recognised, matching how Google marks them up:
 
-* Text ads  — `[data-text-ad]` blocks, labelled "Sponsored"/"Sponsored result".
+* Sponsored results  — `[data-text-ad]` blocks, labelled "Sponsored result".
               Live inside `#tads` (above the organic results) or `#bottomads`
               (below them). Placement is recorded because a top slot is worth
               far more than a bottom one.
-* PLA / Shopping — `.pla-unit` cards inside a `[data-pla]` carousel headed
+* Sponsored products — `.pla-unit` cards inside a `[data-pla]` carousel headed
               "Sponsored products". Each card is one product listing.
 
 Destination URLs are recovered from the `adurl=` parameter of Google's `/aclk?`
@@ -33,7 +33,7 @@ PRICE_RE = re.compile(r"[£$€]\s?\d[\d,]*(?:\.\d{2})?")
 
 
 @dataclass
-class TextAd:
+class SponsoredResult:
     """One `[data-text-ad]` block."""
 
     title: str = ""
@@ -47,7 +47,7 @@ class TextAd:
 
 
 @dataclass
-class ProductAd:
+class SponsoredProduct:
     """One `.pla-unit` Shopping card."""
 
     title: str = ""
@@ -65,34 +65,34 @@ class SerpAds:
 
     query: str = ""
     source_file: str = ""
-    text_ads: list[TextAd] = field(default_factory=list)
-    product_ads: list[ProductAd] = field(default_factory=list)
+    sponsored_results: list[SponsoredResult] = field(default_factory=list)
+    sponsored_products: list[SponsoredProduct] = field(default_factory=list)
     organic_count: int = 0
     is_captcha: bool = False
 
     @property
-    def text_ad_count(self) -> int:
-        return len(self.text_ads)
+    def sponsored_result_count(self) -> int:
+        return len(self.sponsored_results)
 
     @property
-    def pla_count(self) -> int:
-        return len(self.product_ads)
+    def sponsored_product_count(self) -> int:
+        return len(self.sponsored_products)
 
     @property
     def total_ads(self) -> int:
-        return self.text_ad_count + self.pla_count
+        return self.sponsored_result_count + self.sponsored_product_count
 
     @property
-    def has_text_ads(self) -> bool:
-        return self.text_ad_count > 0
+    def has_sponsored_results(self) -> bool:
+        return self.sponsored_result_count > 0
 
     @property
-    def has_plas(self) -> bool:
-        return self.pla_count > 0
+    def has_sponsored_products(self) -> bool:
+        return self.sponsored_product_count > 0
 
     @property
-    def top_text_ads(self) -> int:
-        return sum(1 for a in self.text_ads if a.placement == "top")
+    def top_sponsored_results(self) -> int:
+        return sum(1 for a in self.sponsored_results if a.placement == "top")
 
     def to_dict(self) -> dict:
         return {
@@ -100,14 +100,14 @@ class SerpAds:
             "source_file": self.source_file,
             "is_captcha": self.is_captcha,
             "organic_count": self.organic_count,
-            "text_ad_count": self.text_ad_count,
-            "pla_count": self.pla_count,
+            "sponsored_result_count": self.sponsored_result_count,
+            "sponsored_product_count": self.sponsored_product_count,
             "total_ads": self.total_ads,
-            "has_text_ads": self.has_text_ads,
-            "has_plas": self.has_plas,
-            "top_text_ads": self.top_text_ads,
-            "text_ads": [asdict(a) for a in self.text_ads],
-            "product_ads": [asdict(a) for a in self.product_ads],
+            "has_sponsored_results": self.has_sponsored_results,
+            "has_sponsored_products": self.has_sponsored_products,
+            "top_sponsored_results": self.top_sponsored_results,
+            "sponsored_results": [asdict(a) for a in self.sponsored_results],
+            "sponsored_products": [asdict(a) for a in self.sponsored_products],
         }
 
 
@@ -140,7 +140,7 @@ def unwrap_aclk(href: str) -> str:
     """Pull the advertiser's real landing page out of a Google `/aclk?` redirect.
 
     Falls back to the raw href when there is no `adurl`/`ludocid` payload — some
-    PLA cards point at a Google Shopping interstitial instead.
+    sponsored product cards point at a Google Shopping interstitial instead.
     """
     if not href:
         return ""
@@ -152,6 +152,26 @@ def unwrap_aclk(href: str) -> str:
         if key in qs and qs[key]:
             return unquote(qs[key][0])
     return href
+
+
+def ad_destination(node) -> str:
+    """Landing page for one ad block.
+
+    Google serves two link shapes: most ads go through the `/aclk?` click tracker,
+    but some link straight to the advertiser with no wrapper at all. Matching only
+    on `aclk` silently dropped the destination for ~27% of sponsored results (35% of
+    top-slot ones), so fall back to the first non-Google external link.
+    """
+    link = node.select_one('a[href*="aclk"]')
+    if link and link.get("href"):
+        return unwrap_aclk(link["href"])
+    for a in node.select('a[href^="http"]'):
+        host = _domain(a["href"])
+        # google.com links inside an ad are Google's own furniture — seller
+        # rating popouts, "My Ad Centre" and similar, never the landing page.
+        if host and not host.endswith("google.com"):
+            return a["href"]
+    return ""
 
 
 def _domain(url: str) -> str:
@@ -196,8 +216,8 @@ def _extract_query(soup: BeautifulSoup, html: str) -> str:
     return _clean(m.group(1)) if m else ""
 
 
-def extract_text_ads(soup: BeautifulSoup) -> list[TextAd]:
-    ads: list[TextAd] = []
+def extract_sponsored_results(soup: BeautifulSoup) -> list[SponsoredResult]:
+    ads: list[SponsoredResult] = []
     seen: set[int] = set()
     by_placement: dict[str, int] = {}
 
@@ -211,8 +231,7 @@ def extract_text_ads(soup: BeautifulSoup) -> list[TextAd]:
         headings = [h for h in headings if h and "Ad Centre" not in h and "Ad Center" not in h]
         title = headings[0] if headings else ""
 
-        link = node.select_one('a[href*="aclk"]')
-        dest = unwrap_aclk(link.get("href", "")) if link else ""
+        dest = ad_destination(node)
 
         # The visible green URL — first http(s) string in the rendered text.
         text = node.get_text(" | ", strip=True)
@@ -236,7 +255,7 @@ def extract_text_ads(soup: BeautifulSoup) -> list[TextAd]:
         by_placement[placement] = by_placement.get(placement, 0) + 1
 
         ads.append(
-            TextAd(
+            SponsoredResult(
                 title=title,
                 advertiser=advertiser,
                 display_url=display_url,
@@ -250,8 +269,8 @@ def extract_text_ads(soup: BeautifulSoup) -> list[TextAd]:
     return ads
 
 
-def extract_product_ads(soup: BeautifulSoup) -> list[ProductAd]:
-    ads: list[ProductAd] = []
+def extract_sponsored_products(soup: BeautifulSoup) -> list[SponsoredProduct]:
+    ads: list[SponsoredProduct] = []
     by_placement: dict[str, int] = {}
 
     for card in soup.select(".pla-unit"):
@@ -281,8 +300,7 @@ def extract_product_ads(soup: BeautifulSoup) -> list[ProductAd]:
         if not merchant:
             merchant = next((p for p in parts[1:] if _is_merchant_candidate(p)), "")
 
-        link = card.select_one('a[href*="aclk"]')
-        dest = unwrap_aclk(link.get("href", "")) if link else ""
+        dest = ad_destination(card)
 
         placement = _placement_of(card)
         by_placement[placement] = by_placement.get(placement, 0) + 1
@@ -291,7 +309,7 @@ def extract_product_ads(soup: BeautifulSoup) -> list[ProductAd]:
         extras = "; ".join(p for p in parts[1:] if p not in consumed)[:200]
 
         ads.append(
-            ProductAd(
+            SponsoredProduct(
                 title=title,
                 price=price,
                 merchant=merchant,
@@ -328,8 +346,8 @@ def extract_ads(html: str, source_file: str = "", query: str = "") -> SerpAds:
     return SerpAds(
         query=query or _extract_query(soup, html),
         source_file=source_file,
-        text_ads=extract_text_ads(soup),
-        product_ads=extract_product_ads(soup),
+        sponsored_results=extract_sponsored_results(soup),
+        sponsored_products=extract_sponsored_products(soup),
         organic_count=count_organic(soup),
     )
 
@@ -340,7 +358,7 @@ def extract_file(path: Path) -> SerpAds:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Extract sponsored results (text ads + PLAs) from saved Google SERPs.")
+    ap = argparse.ArgumentParser(description="Extract sponsored results and sponsored products from saved Google SERPs.")
     ap.add_argument("files", nargs="+", type=Path, help="Saved SERP HTML file(s).")
     ap.add_argument("--json", type=Path, default=None, help="Write full records to this JSON file.")
     args = ap.parse_args()
@@ -352,14 +370,14 @@ def main() -> int:
             continue
         rec = extract_file(path)
         records.append(rec)
-        tag = "CAPTCHA" if rec.is_captcha else f"{rec.text_ad_count} text ads, {rec.pla_count} PLAs"
+        tag = "CAPTCHA" if rec.is_captcha else f"{rec.sponsored_result_count} sponsored results, {rec.sponsored_product_count} sponsored products"
         print(f"{path.name}: {rec.query!r} — {tag}")
-        for a in rec.text_ads:
-            print(f"    [text/{a.placement}#{a.slot}] {a.advertiser} — {a.title[:60]}")
-        for p in rec.product_ads[:5]:
-            print(f"    [pla#{p.slot}] {p.price} {p.merchant} — {p.title[:50]}")
-        if rec.pla_count > 5:
-            print(f"    … and {rec.pla_count - 5} more PLA cards")
+        for a in rec.sponsored_results:
+            print(f"    [result/{a.placement}#{a.slot}] {a.advertiser} — {a.title[:60]}")
+        for p in rec.sponsored_products[:5]:
+            print(f"    [product#{p.slot}] {p.price} {p.merchant} — {p.title[:50]}")
+        if rec.sponsored_product_count > 5:
+            print(f"    … and {rec.sponsored_product_count - 5} more sponsored product cards")
 
     if args.json:
         args.json.write_text(

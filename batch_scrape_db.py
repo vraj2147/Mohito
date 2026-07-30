@@ -59,7 +59,10 @@ def run(args) -> int:
     run_id, run_uuid = store.start_run(config=vars(args), notes=args.notes)
     html_root = Path(args.out_dir) / str(run_uuid) / "html"
 
-    jobs = store.build_queue(shuffle=not args.no_shuffle, cap=args.limit)
+    jobs = store.build_queue(
+        shuffle=not args.no_shuffle, cap=args.limit,
+        term=args.term, distinct=args.distinct,
+    )
     if not jobs:
         print("Queue is empty — nothing pending in search_terms.", file=sys.stderr)
         store.finish_run(run_id)
@@ -240,6 +243,10 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--out-dir", default="runs/db", help="Root for per-run HTML directories.")
     ap.add_argument("--limit", type=int, default=None, help="Cap the number of scrapes.")
     ap.add_argument("--no-shuffle", action="store_true", help="Run the queue in term order.")
+    ap.add_argument("--term", default=None,
+                    help="Restrict the queue to this exact search term.")
+    ap.add_argument("--distinct", action="store_true",
+                    help="At most one scrape per term (breadth instead of repeats).")
     ap.add_argument("--no-compress", action="store_true", help="Store plain .html instead of .html.gz.")
     ap.add_argument("--notes", default=None, help="Free-text note stored on the run row.")
 

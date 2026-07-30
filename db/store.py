@@ -170,18 +170,31 @@ class Store:
             cur.execute(sql, params)
             return cur.fetchall()
 
-    def build_queue(self, shuffle: bool = True, cap: int | None = None) -> list[dict]:
+    def build_queue(
+        self,
+        shuffle: bool = True,
+        cap: int | None = None,
+        term: str | None = None,
+        distinct: bool = False,
+    ) -> list[dict]:
         """Expand pending work into a flat list of individual jobs.
 
         A term needing 500 more scrapes contributes 500 entries. Shuffling matters
         for block avoidance: 500 identical consecutive queries is a far stronger
         bot signal than the same 500 scattered among others.
+
+        `term` restricts the queue to a single search term; `distinct` caps every
+        term at one job. The two together let you run a repeat-heavy batch and a
+        breadth batch separately and compare them.
         """
         import random
 
         jobs: list[dict] = []
         for row in self.pending_work():
-            jobs += [{"term_id": row["term_id"], "term": row["term"]}] * int(row["remaining"])
+            if term is not None and row["term"] != term:
+                continue
+            n = 1 if distinct else int(row["remaining"])
+            jobs += [{"term_id": row["term_id"], "term": row["term"]}] * n
         if shuffle:
             random.shuffle(jobs)
         return jobs[:cap] if cap else jobs
@@ -249,21 +262,21 @@ class Store:
         """Store the parsed per-SERP counts and the individual ads."""
         with self.conn.cursor() as cur:
             cur.execute(
-                """INSERT INTO serp_results (request_id, text_ad_count, pla_count,
-                                             total_ads, top_text_ads, organic_count)
+                """INSERT INTO serp_results (request_id, sponsored_result_count, sponsored_product_count,
+                                             total_ads, top_sponsored_results, organic_count)
                    VALUES (%s, %s, %s, %s, %s, %s)
                    ON CONFLICT (request_id) DO NOTHING""",
-                (request_id, ads.text_ad_count, ads.pla_count, ads.total_ads,
-                 ads.top_text_ads, ads.organic_count),
+                (request_id, ads.sponsored_result_count, ads.sponsored_product_count, ads.total_ads,
+                 ads.top_sponsored_results, ads.organic_count),
             )
             rows = [
-                (request_id, "text", a.placement, a.slot, a.title,
+                (request_id, "sponsored_result", a.placement, a.slot, a.title,
                  a.advertiser, None, a.destination_url)
-                for a in ads.text_ads
+                for a in ads.sponsored_results
             ] + [
-                (request_id, "pla", p.placement, p.slot, p.title,
+                (request_id, "sponsored_product", p.placement, p.slot, p.title,
                  p.merchant, p.price, p.destination_url)
-                for p in ads.product_ads
+                for p in ads.sponsored_products
             ]
             if rows:
                 cur.executemany(
@@ -293,3 +306,9 @@ class Store:
         with self.conn.cursor() as cur:
             cur.execute(sql, params)
             return cur.fetchall()
+
+    def execute(self, sql: str, params: tuple = ()) -> int:
+        """Run a statement that returns no rows (DELETE/UPDATE); returns rowcount."""
+        with self.conn.cursor() as cur:
+            cur.execute(sql, params)
+            return cur.rowcount

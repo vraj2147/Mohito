@@ -182,7 +182,7 @@ class GoogleSession:
             pass
 
         if self.scroll:
-            # Ads and PLA carousels lazy-load; without this the SERP under-reports.
+            # Ads and sponsored product carousels lazy-load; without this the SERP under-reports.
             scroll_to_bottom(page)
             page.wait_for_timeout(400)
 
