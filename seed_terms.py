@@ -8,6 +8,10 @@ That tagging is the point: ad rates are only meaningful if the workload contains
 queries that genuinely should NOT carry ads. A list of 1000 shopping queries would
 report ~100% ad coverage and tell you nothing.
 
+Shared by every stage: v2 reads search_terms directly via v_pending_work, and v3's
+loader builds its RabbitMQ messages from the same view. Run this first, whichever
+stage you then use.
+
 Usage:
     python seed_terms.py --distinct 1000 --repeat-term "iPhone 16 Pro" --repeats 500
     python seed_terms.py --dry-run --distinct 20
@@ -17,7 +21,7 @@ Usage:
 from __future__ import annotations
 
 import sys as _sys, pathlib as _pl
-_ROOT = _pl.Path(__file__).resolve().parent.parent
+_ROOT = _pl.Path(__file__).resolve().parent
 for _p in (str(_ROOT), str(_ROOT / "lib"), str(_ROOT / "v3_distributed")):
     if _p not in _sys.path:
         _sys.path.insert(0, _p)

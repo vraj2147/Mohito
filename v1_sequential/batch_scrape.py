@@ -5,7 +5,7 @@ different terms — and saves the raw rendered HTML of every SERP.
 
 The raw HTML is the product. It is written to `<out-dir>/html/` before anything
 parses it, so the scrape is never lost to a parser bug or a Google markup change.
-Ad extraction (text ads + PLAs, via ad_extractor.py) runs as a convenience pass over
+Ad extraction (sponsored results + products, via ad_extractor.py) runs as a convenience pass over
 each page and its failures are recorded, not fatal. You can always re-derive any
 metric offline from the saved HTML.
 
@@ -194,20 +194,20 @@ def run_batch(args) -> list[dict]:
                 try:
                     ads = extract_ads(html, query=query)
                     row.update(
-                        text_ad_count=ads.text_ad_count,
-                        pla_count=ads.pla_count,
+                        sponsored_result_count=ads.sponsored_result_count,
+                        sponsored_product_count=ads.sponsored_product_count,
                         total_ads=ads.total_ads,
-                        top_text_ads=ads.top_text_ads,
+                        top_sponsored_results=ads.top_sponsored_results,
                         organic_count=ads.organic_count,
-                        text_advertisers=[a.advertiser for a in ads.text_ads if a.advertiser],
-                        pla_merchants=[p.merchant for p in ads.product_ads if p.merchant],
-                        text_ads=[{"title": a.title, "advertiser": a.advertiser,
+                        sponsored_result_advertisers=[a.advertiser for a in ads.sponsored_results if a.advertiser],
+                        sponsored_product_merchants=[p.merchant for p in ads.sponsored_products if p.merchant],
+                        sponsored_results=[{"title": a.title, "advertiser": a.advertiser,
                                    "destination_url": a.destination_url,
                                    "placement": a.placement, "slot": a.slot}
-                                  for a in ads.text_ads],
-                        product_ads=[{"title": p.title, "price": p.price, "merchant": p.merchant,
+                                  for a in ads.sponsored_results],
+                        sponsored_products=[{"title": p.title, "price": p.price, "merchant": p.merchant,
                                       "destination_url": p.destination_url, "slot": p.slot}
-                                     for p in ads.product_ads],
+                                     for p in ads.sponsored_products],
                     )
                 except Exception as exc:
                     row["extract_error"] = f"{type(exc).__name__}: {exc}"[:200]
@@ -291,13 +291,13 @@ def summarise(rows: list[dict], out_dir: Path) -> None:
         return
 
     n = len(ok)
-    with_text = sum(1 for r in ok if r["text_ad_count"] > 0)
-    with_pla = sum(1 for r in ok if r["pla_count"] > 0)
+    with_res = sum(1 for r in ok if r["sponsored_result_count"] > 0)
+    with_prod = sum(1 for r in ok if r["sponsored_product_count"] > 0)
     with_any = sum(1 for r in ok if r["total_ads"] > 0)
-    with_both = sum(1 for r in ok if r["text_ad_count"] > 0 and r["pla_count"] > 0)
-    tot_text = sum(r["text_ad_count"] for r in ok)
-    tot_pla = sum(r["pla_count"] for r in ok)
-    tot_top = sum(r.get("top_text_ads", 0) for r in ok)
+    with_both = sum(1 for r in ok if r["sponsored_result_count"] > 0 and r["sponsored_product_count"] > 0)
+    tot_res = sum(r["sponsored_result_count"] for r in ok)
+    tot_prod = sum(r["sponsored_product_count"] for r in ok)
+    tot_top = sum(r.get("top_sponsored_results", 0) for r in ok)
 
     print("\n" + "=" * 72)
     print("SPONSORED AD RATE REPORT")
@@ -305,15 +305,15 @@ def summarise(rows: list[dict], out_dir: Path) -> None:
     print(f"SERPs scraped OK      : {n}")
     print(f"CAPTCHA / error       : {n_captcha} / {n_error}")
     print()
-    print(f"TEXT AD RATE          : {with_text / n:>7.1%}  ({with_text}/{n} SERPs carried >=1 text ad)")
-    print(f"PLA RATE              : {with_pla / n:>7.1%}  ({with_pla}/{n} SERPs carried >=1 shopping ad)")
+    print(f"SPONSORED RESULT RATE : {with_res / n:>7.1%}  ({with_res}/{n} SERPs carried >=1 sponsored result)")
+    print(f"SPONSORED PRODUCT RATE: {with_prod / n:>7.1%}  ({with_prod}/{n} SERPs carried >=1 sponsored product)")
     print(f"ANY AD RATE           : {with_any / n:>7.1%}  ({with_any}/{n})")
     print(f"BOTH FORMATS          : {with_both / n:>7.1%}  ({with_both}/{n})")
     print()
-    print(f"Avg text ads / SERP   : {tot_text / n:>7.2f}   (total {tot_text})")
-    print(f"Avg PLAs / SERP       : {tot_pla / n:>7.2f}   (total {tot_pla})")
-    if tot_text:
-        print(f"Text ads in TOP slot  : {tot_top / tot_text:>7.1%}  ({tot_top}/{tot_text})")
+    print(f"Avg sponsored results : {tot_res / n:>7.2f}   (total {tot_res})")
+    print(f"Avg sponsored products: {tot_prod / n:>7.2f}   (total {tot_prod})")
+    if tot_res:
+        print(f"Results in TOP slot   : {tot_top / tot_res:>7.1%}  ({tot_top}/{tot_res})")
 
     # Per-query breakdown
     per = defaultdict(list)
@@ -321,22 +321,22 @@ def summarise(rows: list[dict], out_dir: Path) -> None:
         per[r["query"]].append(r)
 
     print("\n" + "-" * 72)
-    print(f"{'QUERY':<34}{'N':>5}{'TXT%':>7}{'PLA%':>7}{'txt/s':>7}{'pla/s':>7}")
+    print(f"{'QUERY':<34}{'N':>5}{'RES%':>7}{'PROD%':>7}{'res/s':>7}{'prd/s':>7}")
     print("-" * 72)
     for q, rs in sorted(per.items(), key=lambda kv: -len(kv[1])):
         m = len(rs)
-        t_rate = sum(1 for r in rs if r["text_ad_count"] > 0) / m
-        p_rate = sum(1 for r in rs if r["pla_count"] > 0) / m
+        res_rate = sum(1 for r in rs if r["sponsored_result_count"] > 0) / m
+        prod_rate = sum(1 for r in rs if r["sponsored_product_count"] > 0) / m
         print(
-            f"{q[:33]:<34}{m:>5}{t_rate:>6.0%}{p_rate:>7.0%}"
-            f"{sum(r['text_ad_count'] for r in rs) / m:>7.2f}"
-            f"{sum(r['pla_count'] for r in rs) / m:>7.2f}"
+            f"{q[:33]:<34}{m:>5}{res_rate:>6.0%}{prod_rate:>7.0%}"
+            f"{sum(r['sponsored_result_count'] for r in rs) / m:>7.2f}"
+            f"{sum(r['sponsored_product_count'] for r in rs) / m:>7.2f}"
         )
 
     # Who is advertising
-    advertisers = Counter(a for r in ok for a in r.get("text_advertisers", []))
-    merchants = Counter(m for r in ok for m in r.get("pla_merchants", []))
-    for label, counter in (("TOP TEXT-AD ADVERTISERS", advertisers), ("TOP PLA MERCHANTS", merchants)):
+    advertisers = Counter(a for r in ok for a in r.get("sponsored_result_advertisers", []))
+    merchants = Counter(m for r in ok for m in r.get("sponsored_product_merchants", []))
+    for label, counter in (("TOP SPONSORED RESULT ADVERTISERS", advertisers), ("TOP SPONSORED PRODUCT MERCHANTS", merchants)):
         if not counter:
             continue
         print(f"\n{label}")
@@ -349,46 +349,46 @@ def summarise(rows: list[dict], out_dir: Path) -> None:
         "serps_ok": n,
         "captcha": n_captcha,
         "errors": n_error,
-        "text_ad_rate": with_text / n,
-        "pla_rate": with_pla / n,
+        "sponsored_result_rate": with_res / n,
+        "sponsored_product_rate": with_prod / n,
         "any_ad_rate": with_any / n,
         "both_formats_rate": with_both / n,
-        "avg_text_ads_per_serp": tot_text / n,
-        "avg_plas_per_serp": tot_pla / n,
-        "total_text_ads": tot_text,
-        "total_plas": tot_pla,
+        "avg_sponsored_results_per_serp": tot_res / n,
+        "avg_sponsored_products_per_serp": tot_prod / n,
+        "total_sponsored_results": tot_res,
+        "total_sponsored_products": tot_prod,
         "per_query": {
             q: {
                 "serps": len(rs),
-                "text_ad_rate": sum(1 for r in rs if r["text_ad_count"] > 0) / len(rs),
-                "pla_rate": sum(1 for r in rs if r["pla_count"] > 0) / len(rs),
-                "avg_text_ads": sum(r["text_ad_count"] for r in rs) / len(rs),
-                "avg_plas": sum(r["pla_count"] for r in rs) / len(rs),
+                "sponsored_result_rate": sum(1 for r in rs if r["sponsored_result_count"] > 0) / len(rs),
+                "sponsored_product_rate": sum(1 for r in rs if r["sponsored_product_count"] > 0) / len(rs),
+                "avg_text_ads": sum(r["sponsored_result_count"] for r in rs) / len(rs),
+                "avg_plas": sum(r["sponsored_product_count"] for r in rs) / len(rs),
             }
             for q, rs in per.items()
         },
-        "top_text_advertisers": advertisers.most_common(25),
-        "top_pla_merchants": merchants.most_common(25),
+        "top_sponsored_result_advertisers": advertisers.most_common(25),
+        "top_sponsored_product_merchants": merchants.most_common(25),
     }
     path = out_dir / "ad_rate_summary.json"
     path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
 
     csv_path = out_dir / "per_serp.csv"
     with csv_path.open("w", encoding="utf-8") as f:
-        f.write("i,query,status,text_ad_count,pla_count,total_ads,top_text_ads,organic_count\n")
+        f.write("i,query,status,sponsored_result_count,sponsored_product_count,total_ads,top_sponsored_results,organic_count\n")
         for r in rows:
             q = '"' + str(r.get("query", "")).replace('"', '""') + '"'
             f.write(
-                f"{r.get('i','')},{q},{r.get('status','')},{r.get('text_ad_count','')},"
-                f"{r.get('pla_count','')},{r.get('total_ads','')},"
-                f"{r.get('top_text_ads','')},{r.get('organic_count','')}\n"
+                f"{r.get('i','')},{q},{r.get('status','')},{r.get('sponsored_result_count','')},"
+                f"{r.get('sponsored_product_count','')},{r.get('total_ads','')},"
+                f"{r.get('top_sponsored_results','')},{r.get('organic_count','')}\n"
             )
     print(f"\nWrote {path}\nWrote {csv_path}")
 
 
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(
-        description="Batch-scrape Google SERPs and report text-ad / PLA rates.",
+        description="Batch-scrape Google SERPs and report sponsored result / product rates.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
